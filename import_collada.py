@@ -17,6 +17,7 @@ from collada.polylist import Polylist, BoundPolylist
 from collada.primitive import BoundPrimitive
 from collada.scene import Scene, Node, NodeNode, GeometryNode
 from collada.triangleset import TriangleSet, BoundTriangleSet
+import numpy as np
 
 
 __all__ = ['load']
@@ -105,6 +106,7 @@ class ColladaImport(object):
             primitives = bgeom.primitives()
 
         b_geoms = []
+
         for i, p in enumerate(primitives):
             if isinstance(p, BoundPrimitive):
                 b_mat_key = p.original.material
@@ -114,11 +116,11 @@ class ColladaImport(object):
             b_meshname = self.name(bgeom.original, i)
 
             if isinstance(p, (TriangleSet, BoundTriangleSet)):
-                b_obj = self.geometry_triangleset(
+                b_obj = self.geometry_polyset(
                         p, b_meshname, b_mat)
             elif isinstance(p, (Polylist, BoundPolylist)):
-                b_obj = self.geometry_triangleset(
-                        p.triangleset(), b_meshname, b_mat)
+                b_obj = self.geometry_polyset(
+                        p, b_meshname, b_mat)
             else:
                 continue
             if not b_obj:
@@ -141,45 +143,50 @@ class ColladaImport(object):
 
         return b_geoms
 
-    def geometry_triangleset(self, triset, b_name, b_mat):
+    def geometry_polyset(self, polyset, b_name, b_mat):
         if not self._is_apply() and b_name in bpy.data.meshes:
             # with applied transformation, mesh reuse is not possible
             b_mesh = bpy.data.meshes[b_name]
         else:
-            if triset.vertex_index is None or \
-                    not len(triset.vertex_index):
+            if polyset is None or not len(polyset):
                 return
 
             b_mesh = bpy.data.meshes.new(b_name)
-            b_mesh.vertices.add(len(triset.vertex))
-            b_mesh.faces.add(len(triset.vertex_index))
-            for vidx, vertex in enumerate(triset.vertex):
+            b_mesh.vertices.add(len(polyset.vertex))
+            b_mesh.polygons.add(len(polyset))
+            for vidx, vertex in enumerate(polyset.vertex):
                 b_mesh.vertices[vidx].co = vertex
 
-            # eekadoodle
-            eekadoodle_faces = [v
-                    for f in triset.vertex_index
-                    for v in _eekadoodle_face(*f)]
-            b_mesh.faces.foreach_set('vertices_raw', eekadoodle_faces)
+            nLoops = sum([len(poly.vertices) for poly in polyset])
+            b_mesh.loops.add(nLoops)
+            nextLoop = 0
 
-            has_normal = (triset.normal_index is not None)
-            has_uv = (len(triset.texcoord_indexset) > 0)
+            for colpoly, blenpoly in zip(polyset, b_mesh.polygons):
+                face = [int(i) for i in colpoly.indices]
+                blenpoly.loop_start = nextLoop
+                blenpoly.loop_total = len(face)
+                for idx in face:
+                    b_mesh.loops[nextLoop].vertex_index = idx
+                    nextLoop = nextLoop + 1
+
+            has_normal = (polyset.normal_index is not None)
+            has_uv = (len(polyset.texcoord_indexset) > 0)
 
             if has_normal:
                 # TODO import normals
-                for i, f in enumerate(b_mesh.faces):
+                for i, f in enumerate(b_mesh.polygons):
                     f.use_smooth = not _is_flat_face(
-                            triset.normal[triset.normal_index[i]])
+                            polyset.normal[polyset.normal_index[i]])
             if has_uv:
-                for j in range(len(triset.texcoord_indexset)):
+                for j in range(len(polyset.texcoord_indexset)):
                     self.texcoord_layer(
-                            triset,
-                            triset.texcoordset[j],
-                            triset.texcoord_indexset[j],
+                            polyset,
+                            polyset.texcoordset[j],
+                            polyset.texcoord_indexset[j],
                             b_mesh,
                             b_mat)
 
-            b_mesh.update()
+            b_mesh.update(True, True)
 
         b_obj = bpy.data.objects.new(b_name, b_mesh)
         b_obj.data = b_mesh
@@ -296,7 +303,7 @@ class ColladaImport(object):
 
     def texcoord_layer(self, triset, texcoord, index, b_mesh, b_mat):
         b_mesh.uv_textures.new()
-        for i, f in enumerate(b_mesh.faces):
+        for i, f in enumerate(b_mesh.polygons):
             t1, t2, t3 = index[i]
             tface = b_mesh.uv_textures[-1].data[i]
             # eekadoodle
